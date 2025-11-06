@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="ko">
   <head>
@@ -492,6 +493,18 @@ const GameBoard = ({
   );
 };
 
+const StatBar = ({ icon, value, max, color, unit = '', label }) => {
+  const percentage = Math.min(100, (value / max) * 100);
+  return (
+    <div className="flex items-center space-x-1.5 text-xs" title={`${label}: ${value.toFixed(1)}${unit}`}>
+      <div className="w-4 h-4 flex-shrink-0 text-gray-400">{icon}</div>
+      <div className="w-full bg-gray-600 rounded-full h-2.5">
+        <div className={`${color} h-2.5 rounded-full`} style={{ width: `${percentage}%` }}></div>
+      </div>
+    </div>
+  );
+};
+
 const TowerCard = ({ type, selected, onSelect, money, buff, towers }) => {
   const towerDef = TOWER_DEFINITIONS[type];
   const existingTower = towers.find(t => t.type === type);
@@ -513,24 +526,55 @@ const TowerCard = ({ type, selected, onSelect, money, buff, towers }) => {
   
   const canAfford = money >= cost;
 
-  const renderStats = () => {
-    const stats = towerDef.levels[0];
+  const statsToShow = existingTower 
+    ? towerDef.levels[existingTower.level - 1]
+    : towerDef.levels[0];
+
+  const effectiveDamage = (statsToShow.damage || statsToShow.baseDamage || 0) * (1 + buff.damage);
+  const effectiveRange = (statsToShow.range || 0) + buff.range;
+  const effectiveFireRate = statsToShow.fireRate > 0 ? 1000 / (statsToShow.fireRate * (1 - buff.fireRate)) : 0;
+  
+  const isSpecialTower = ['bank', 'buff', 'teleport'].includes(type);
+
+  const icons = {
+      damage: <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M20.763 6.478L17.521 3.236a2.953 2.953 0 00-4.176 0L2.234 14.347a1 1 0 00-.293.708v4.6a1 1 0 001 1h4.6a1 1 0 00.707-.293l11.111-11.11a2.954 2.954 0 000-4.174zM8 17H5v-3l7-7 3 3-7 7z"/></svg>,
+      range: <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 1010 10A10.011 10.011 0 0012 2zm0 18a8 8 0 118-8 8.009 8.009 0 01-8 8z"/><path d="M12 4a8 8 0 108 8 8.009 8.009 0 00-8-8zm0 14a6 6 0 116-6 6.007 6.007 0 01-6 6z"/><path d="M12 6a6 6 0 106 6 6.007 6.007 0 00-6-6zm0 10a4 4 0 114-4 4.005 4.005 0 01-4 4z"/><path d="M12 8a4 4 0 104 4 4.005 4.005 0 00-4-4zm0 6a2 2 0 112-2 2.002 2.002 0 01-2 2z"/></svg>,
+      fireRate: <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M10.313 3.062L4.5 13.5h5.813l-3.375 7.438 11.5-12.188H12.5L10.313 3.062z"/></svg>,
+  };
+
+  const renderSpecialStats = () => {
+    let text = '';
     switch(type) {
-      case 'bank': return `이율: ${(stats.interestRate * 100).toFixed(0)}%`;
-      case 'laser': return `초당피해: ${(stats.baseDamage * (1 + buff.damage)).toFixed(1)} / 범위: ${(stats.range + buff.range).toFixed(0)}`;
-      case 'teleport': return `확률: ${(stats.teleportChance * 100).toFixed(0)}% / 범위: ${(stats.range + buff.range).toFixed(0)}`;
-      case 'buff': return `공격력 버프: ${(stats.damageBuff * 100).toFixed(0)}% / 범위: ${stats.range}`;
-      default: return `데미지: ${(stats.damage * (1 + buff.damage)).toFixed(1)} / 범위: ${(stats.range + buff.range).toFixed(0)}`;
+      case 'bank': text = `이율: ${(statsToShow.interestRate * 100).toFixed(0)}%`; break;
+      case 'buff': text = `공격력 버프: ${(statsToShow.damageBuff * 100).toFixed(0)}%`; break;
+      case 'teleport': text = `확률: ${(statsToShow.teleportChance * 100).toFixed(0)}%`; break;
     }
+    return <p className="text-xs text-gray-400 text-center mt-2">{text}</p>;
   }
 
   return (
-    <button onClick={onSelect} disabled={!canAfford || isMaxLevel} className={`p-2 border-2 rounded-lg transition-all text-left w-full ${selected ? 'border-yellow-400 bg-yellow-900/50' : 'border-gray-600 hover:bg-gray-700'} ${(!canAfford || isMaxLevel) ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
-      <div className="flex justify-between items-center">
-        <h3 className="font-bold text-md">{buttonText}</h3>
-        {cost > 0 && <p className="font-bold text-yellow-400">${cost}</p>}
+    <button onClick={onSelect} disabled={!canAfford || isMaxLevel} className={`p-2 border-2 rounded-lg transition-all text-left w-full flex flex-col justify-between ${selected ? 'border-yellow-400 bg-yellow-900/50' : 'border-gray-600 hover:bg-gray-700'} ${(!canAfford || isMaxLevel) ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
+      <div>
+        <div className="flex justify-between items-center">
+          <h3 className="font-bold text-md">{buttonText}</h3>
+          {cost > 0 && <p className="font-bold text-yellow-400">${cost}</p>}
+        </div>
       </div>
-      <p className="text-xs text-gray-400">{renderStats()}</p>
+      <div className="mt-2 space-y-1">
+        {isSpecialTower ? renderSpecialStats() : (
+            <>
+            { (statsToShow.damage > 0 || statsToShow.baseDamage > 0) &&
+                <StatBar label="데미지" icon={icons.damage} value={effectiveDamage} max={400} color="bg-red-500" />
+            }
+            { statsToShow.range > 0 && 
+                <StatBar label="사거리" icon={icons.range} value={effectiveRange} max={400} color="bg-blue-500" />
+            }
+            { statsToShow.fireRate > 0 && type !== 'laser' &&
+                <StatBar label="공격 속도" icon={icons.fireRate} value={effectiveFireRate} max={3} color="bg-yellow-500" unit="aps" />
+            }
+            </>
+        )}
+      </div>
     </button>
   );
 };
