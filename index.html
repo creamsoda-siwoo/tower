@@ -1,0 +1,1047 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>타워디펜스 게임</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+      body {
+        overscroll-behavior: none;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/client": "https://aistudiocdn.com/react-dom@^19.2.0/client",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "uuid": "https://aistudiocdn.com/uuid@^13.0.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/"
+  }
+}
+</script>
+</head>
+  <body class="bg-gray-900 text-white">
+    <div id="root"></div>
+    <script type="text/babel" data-type="module">
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import ReactDOM from 'react-dom/client';
+import { v4 as uuidv4 } from 'uuid';
+
+// --- START OF TYPES ---
+interface Vector2D {
+  x: number;
+  y: number;
+}
+
+type TowerType = 'basic' | 'cannon' | 'slow' | 'splash' | 'sniper' | 'poison' | 'chain' | 'buff' | 'bank' | 'laser' | 'teleport';
+
+interface Tower {
+  id: string;
+  type: TowerType;
+  x: number;
+  y: number;
+  level: number;
+  lastShotTime: number;
+  totalInvested: number;
+  laserTargetId?: string;
+  laserFocusStartTime?: number;
+}
+
+type EnemyType = 'normal' | 'fast' | 'heavy';
+
+interface EnemyStats {
+  health: number;
+  speed: number;
+  bounty: number;
+}
+
+interface Effect {
+  type: 'slow' | 'poison';
+  amount: number;
+  expires: number;
+}
+
+interface Enemy extends EnemyStats {
+  id: string;
+  type: EnemyType;
+  pathProgress: number;
+  maxHealth: number;
+  effects: Effect[];
+}
+
+interface ProjectileEffect {
+    type: 'slow' | 'poison' | 'teleport';
+    amount: number;
+    duration: number;
+}
+
+interface Projectile {
+  id:string;
+  x: number;
+  y: number;
+  targetId: string;
+  damage: number;
+  speed: number;
+  effect?: ProjectileEffect;
+  splashRadius?: number;
+  type: TowerType;
+}
+
+type GameState = 'start' | 'playing' | 'wave-cleared' | 'gameOver' | 'win';
+type Difficulty = 'easy' | 'normal' | 'hard';
+type GachaBuffs = Record<TowerType, { damage: number; range: number; fireRate: number }>;
+
+interface SavedGame {
+    playerHealth: number;
+    playerMoney: number;
+    currentWave: number;
+    towers: Tower[];
+    gachaBuffs: GachaBuffs;
+    difficulty: Difficulty;
+}
+
+// --- START OF CONSTANTS ---
+const GAME_BOARD_WIDTH = 800;
+const GAME_BOARD_HEIGHT = 600;
+const GRID_SIZE = 40;
+
+const WAVE_COOLDOWN_SECONDS = 5;
+
+const GACHA_COST = 100;
+const GACHA_BUFFS = {
+    damage: 0.05,
+    range: 2,
+    fireRate: 0.03,
+};
+
+const TOWER_SELL_RATIO = 0.75;
+const SAVE_GAME_KEY = 'towerDefenseSave';
+
+const DIFFICULTY_MODIFIERS: Record<Difficulty, { healthMultiplier: number; bountyMultiplier: number; startingMoney: number; startingHealth: number; }> = {
+    easy: { healthMultiplier: 0.75, bountyMultiplier: 1.0, startingMoney: 400, startingHealth: 50 },
+    normal: { healthMultiplier: 1.0, bountyMultiplier: 1.0, startingMoney: 250, startingHealth: 25 },
+    hard: { healthMultiplier: 1.5, bountyMultiplier: 0.9, startingMoney: 150, startingHealth: 15 },
+};
+
+const PATH_SVG_D = "M -20, 80 H 320 C 360,80 360,120 360,120 V 480 C 360,520 400,520 400,520 H 600 L 680, 400 V 150 C 680,100 720,100 720,100 H 820";
+
+interface TowerLevel {
+  cost: number;
+  damage: number;
+  range: number;
+  fireRate: number;
+  slowAmount?: number;
+  slowDuration?: number;
+  splashRadius?: number;
+  dotAmount?: number;
+  dotDuration?: number;
+  projectileSpeed?: number;
+  chainJumps?: number;
+  chainJumpRange?: number;
+  damageFalloff?: number;
+  damageBuff?: number;
+  fireRateBuff?: number;
+  interestRate?: number;
+  baseDamage?: number;
+  damageRampUp?: number;
+  teleportChance?: number;
+}
+
+interface TowerDefinition {
+  levels: TowerLevel[];
+  name: string;
+}
+
+const TOWER_DEFINITIONS: Record<TowerType, TowerDefinition> = {
+  basic: {
+    name: '기관총',
+    levels: [
+      { cost: 50, damage: 10, range: 120, fireRate: 800 },
+      { cost: 75, damage: 20, range: 130, fireRate: 700 },
+      { cost: 125, damage: 35, range: 140, fireRate: 600 },
+    ],
+  },
+  cannon: {
+    name: '대포',
+    levels: [
+      { cost: 100, damage: 35, range: 150, fireRate: 2000 },
+      { cost: 150, damage: 60, range: 160, fireRate: 1800 },
+      { cost: 220, damage: 100, range: 170, fireRate: 1600 },
+    ],
+  },
+  slow: {
+    name: '얼음',
+    levels: [
+        { cost: 60, damage: 5, range: 100, fireRate: 1500, slowAmount: 0.4, slowDuration: 2000 },
+        { cost: 90, damage: 10, range: 110, fireRate: 1400, slowAmount: 0.5, slowDuration: 2500 },
+        { cost: 140, damage: 15, range: 120, fireRate: 1300, slowAmount: 0.6, slowDuration: 3000 },
+    ]
+  },
+  splash: {
+    name: '박격포',
+    levels: [
+        { cost: 120, damage: 20, range: 180, fireRate: 3000, splashRadius: 40 },
+        { cost: 180, damage: 35, range: 200, fireRate: 2800, splashRadius: 50 },
+        { cost: 250, damage: 55, range: 220, fireRate: 2600, splashRadius: 60 },
+    ]
+  },
+  sniper: {
+    name: '저격수',
+    levels: [
+      { cost: 150, damage: 100, range: 300, fireRate: 4000, projectileSpeed: 50 },
+      { cost: 200, damage: 200, range: 350, fireRate: 3800, projectileSpeed: 50 },
+      { cost: 300, damage: 350, range: 400, fireRate: 3600, projectileSpeed: 50 },
+    ]
+  },
+  poison: {
+    name: '독',
+    levels: [
+      { cost: 80, damage: 5, range: 110, fireRate: 1200, dotAmount: 10, dotDuration: 3000 },
+      { cost: 120, damage: 10, range: 120, fireRate: 1100, dotAmount: 20, dotDuration: 3500 },
+      { cost: 180, damage: 15, range: 130, fireRate: 1000, dotAmount: 35, dotDuration: 4000 },
+    ]
+  },
+  chain: {
+    name: '체인 라이트닝',
+    levels: [
+      { cost: 130, damage: 15, range: 130, fireRate: 1800, chainJumps: 3, chainJumpRange: 60, damageFalloff: 0.7 },
+      { cost: 190, damage: 25, range: 140, fireRate: 1700, chainJumps: 4, chainJumpRange: 65, damageFalloff: 0.75 },
+      { cost: 270, damage: 35, range: 150, fireRate: 1600, chainJumps: 5, chainJumpRange: 70, damageFalloff: 0.8 },
+    ]
+  },
+  buff: {
+    name: '버프',
+    levels: [
+      { cost: 100, damage: 0, range: 100, fireRate: 0, damageBuff: 0.1, fireRateBuff: 0 },
+      { cost: 150, damage: 0, range: 110, fireRate: 0, damageBuff: 0.15, fireRateBuff: 0.05 },
+      { cost: 220, damage: 0, range: 120, fireRate: 0, damageBuff: 0.2, fireRateBuff: 0.1 },
+    ]
+  },
+  bank: {
+    name: '은행',
+    levels: [
+      { cost: 120, damage: 0, range: 0, fireRate: 0, interestRate: 0.05 },
+      { cost: 180, damage: 0, range: 0, fireRate: 0, interestRate: 0.08 },
+      { cost: 250, damage: 0, range: 0, fireRate: 0, interestRate: 0.12 },
+    ]
+  },
+  laser: {
+    name: '레이저',
+    levels: [
+      { cost: 180, damage: 0, range: 140, fireRate: 100, baseDamage: 10, damageRampUp: 5 },
+      { cost: 250, damage: 0, range: 150, fireRate: 100, baseDamage: 15, damageRampUp: 8 },
+      { cost: 350, damage: 0, range: 160, fireRate: 100, baseDamage: 20, damageRampUp: 12 },
+    ]
+  },
+  teleport: {
+    name: '순간이동',
+    levels: [
+      { cost: 200, damage: 0, range: 120, fireRate: 5000, teleportChance: 0.15 },
+      { cost: 300, damage: 0, range: 130, fireRate: 4500, teleportChance: 0.20 },
+      { cost: 450, damage: 0, range: 140, fireRate: 4000, teleportChance: 0.25 },
+    ]
+  }
+};
+
+const ENEMY_WAVES: { count: number; type: EnemyType, stats: EnemyStats }[] = [
+  { count: 8, type: 'normal', stats: { health: 50, speed: 1, bounty: 5 } },
+  { count: 12, type: 'normal', stats: { health: 60, speed: 1.1, bounty: 5 } },
+  { count: 8, type: 'fast', stats: { health: 40, speed: 2, bounty: 7 } },
+  { count: 15, type: 'normal', stats: { health: 70, speed: 1.2, bounty: 6 } },
+  { count: 4, type: 'heavy', stats: { health: 250, speed: 0.8, bounty: 20 } },
+  { count: 12, type: 'fast', stats: { health: 50, speed: 2.2, bounty: 8 } },
+  { count: 20, type: 'normal', stats: { health: 100, speed: 1.3, bounty: 7 } },
+  { count: 8, type: 'heavy', stats: { health: 300, speed: 0.9, bounty: 25 } },
+  { count: 18, type: 'fast', stats: { health: 80, speed: 2.5, bounty: 10 } },
+  { count: 12, type: 'heavy', stats: { health: 400, speed: 1.0, bounty: 30 } },
+];
+
+// --- START OF COMPONENTS ---
+const ProjectileComponent = ({ projectile }) => {
+  const colors = {
+    basic: '#fde047',
+    cannon: '#f97316',
+    slow: '#67e8f9',
+    splash: '#d946ef',
+    sniper: '#ffffff',
+    poison: '#84cc16',
+    chain: '#c084fc',
+    buff: null,
+    bank: null,
+    laser: '#ef4444',
+    teleport: null,
+  };
+
+  const radius = () => {
+      switch(projectile.type) {
+          case 'cannon': return 7;
+          case 'sniper': return 3;
+          case 'chain': return 6;
+          default: return 5;
+      }
+  }
+  
+  const color = colors[projectile.type];
+  if (!color) return null;
+
+  return (
+    <circle
+      cx={projectile.x}
+      cy={projectile.y}
+      r={radius()}
+      fill={color}
+      filter="url(#glow)"
+    />
+  );
+};
+
+const EnemyComponent = ({ enemy, pathElement }) => {
+  if (!pathElement) return null;
+
+  const point = pathElement.getPointAtLength(enemy.pathProgress);
+  const healthPercentage = (enemy.health / enemy.maxHealth) * 100;
+
+  const isSlowed = enemy.effects?.some(e => e.type === 'slow' && e.expires > Date.now());
+
+  const enemyStyles = {
+    normal: { fill: '#16a34a', shape: <circle cx={point.x} cy={point.y} r="10" /> },
+    fast: { fill: '#ca8a04', shape: <polygon points={`${point.x},${point.y-10} ${point.x-10},${point.y+10} ${point.x+10},${point.y+10}`} /> },
+    heavy: { fill: '#9f1239', shape: <rect x={point.x - 12} y={point.y - 12} width="24" height="24" rx="4" /> },
+  };
+  
+  const style = enemyStyles[enemy.type];
+  const fillColor = isSlowed ? '#22d3ee' : style.fill;
+
+  return (
+    <g>
+      <g style={{ fill: fillColor, transition: 'fill 0.3s ease' }}>{style.shape}</g>
+      <rect x={point.x - 15} y={point.y - 22} width="30" height="5" fill="#3f3f46" rx="2" />
+      <rect x={point.x - 15} y={point.y - 22} width={(30 * healthPercentage) / 100} height="5" fill="#dc2626" rx="2" />
+    </g>
+  );
+};
+
+const TowerComponent = ({ tower, onClick, onContextMenu, isSelected }) => {
+  const towerStyles = {
+    basic: { body: <rect x={tower.x - 15} y={tower.y - 15} width="30" height="30" fill="#2563eb" stroke={isSelected ? 'white' : '#93c5fd'} strokeWidth="2" />, cannon: <rect x={tower.x - 5} y={tower.y - 20} width="10" height="20" fill="#60a5fa" />, },
+    cannon: { body: <rect x={tower.x - 20} y={tower.y - 20} width="40" height="40" rx="5" fill="#be123c" stroke={isSelected ? 'white' : '#fecdd3'} strokeWidth="2" />, cannon: <rect x={tower.x - 7.5} y={tower.y - 30} width="15" height="30" fill="#fb7185" />, },
+    slow: { body: <circle cx={tower.x} cy={tower.y} r="18" fill="#0891b2" stroke={isSelected ? 'white' : '#67e8f9'} strokeWidth="2" />, cannon: <circle cx={tower.x} cy={tower.y} r="8" fill="#a5f3fc" />, },
+    splash: { body: <rect x={tower.x - 18} y={tower.y - 18} width="36" height="36" rx="8" fill="#4a044e" stroke={isSelected ? 'white' : '#f0abfc'} strokeWidth="2" />, cannon: <rect x={tower.x - 5} y={tower.y - 25} width="10" height="25" fill="#e879f9" />, },
+    sniper: { body: <rect x={tower.x - 10} y={tower.y - 10} width="20" height="20" fill="#3f3f46" stroke={isSelected ? 'white' : '#a1a1aa'} strokeWidth="2" />, cannon: <rect x={tower.x - 2.5} y={tower.y - 35} width="5" height="40" fill="#71717a" />, },
+    poison: { body: <path d={`M ${tower.x-15} ${tower.y+15} Q ${tower.x} ${tower.y+20} ${tower.x+15} ${tower.y+15} V ${tower.y-5} C ${tower.x+15} ${tower.y-20}, ${tower.x-15} ${tower.y-20}, ${tower.x-15} ${tower.y-5} Z`} fill="#15803d" stroke={isSelected ? 'white' : '#86efac'} strokeWidth="2" />, cannon: <circle cx={tower.x} cy={tower.y} r="8" fill="#4ade80" opacity="0.8" />, },
+    chain: { body: <polygon points={`${tower.x},${tower.y-20} ${tower.x+17},${tower.y+10} ${tower.x-17},${tower.y+10}`} fill="#a21caf" stroke={isSelected ? 'white' : '#e9d5ff'} strokeWidth="2" />, cannon: <circle cx={tower.x} cy={tower.y} r="8" fill="#f0abfc" />, },
+    buff: { body: <circle cx={tower.x} cy={tower.y} r="16" fill="#f59e0b" stroke={isSelected ? 'white' : '#fcd34d'} strokeWidth="2" />, cannon: <circle cx={tower.x} cy={tower.y} r="10" fill="none" stroke="#fef08a" strokeWidth="3" />, },
+    bank: { body: <rect x={tower.x-18} y={tower.y-18} width="36" height="36" rx="5" fill="#ca8a04" stroke={isSelected ? 'white' : '#fde047'} strokeWidth="2" />, cannon: <text x={tower.x} y={tower.y+6} fontSize="24" fill="#fef08a" textAnchor="middle" fontWeight="bold">$</text> },
+    laser: { body: <path d={`M ${tower.x} ${tower.y-20} L ${tower.x+18} ${tower.y+15} L ${tower.x-18} ${tower.y+15} Z`} fill="#7f1d1d" stroke={isSelected ? 'white' : '#fca5a5'} strokeWidth="2" />, cannon: <circle cx={tower.x} cy={tower.y} r="6" fill="#ef4444" />, },
+    teleport: { body: <circle cx={tower.x} cy={tower.y} r="18" fill="#4338ca" stroke={isSelected ? 'white' : '#a5b4fc'} strokeWidth="2" />, cannon: <path d={`M ${tower.x-8} ${tower.y} a 8 8 0 0 1 16 0`} fill="none" stroke="#c7d2fe" strokeWidth="3" strokeLinecap="round" transform={`rotate(45 ${tower.x} ${tower.y})`} />, }
+  };
+
+  const style = towerStyles[tower.type];
+
+  const handleContextMenu = (e) => {
+      e.preventDefault();
+      onContextMenu(tower.id);
+  }
+
+  const levelIndicators = Array.from({ length: tower.level }).map((_, i) => (
+      <rect key={i} x={tower.x - 10 + (i * 5)} y={tower.y + 18} width="4" height="4" fill="gold" stroke="black" strokeWidth="0.5"/>
+  ));
+
+  return (
+    <g onClick={() => onClick(tower.id)} onContextMenu={handleContextMenu} className="cursor-pointer tower-group">
+      {style.body}
+      {style.cannon}
+      {levelIndicators}
+    </g>
+  );
+};
+
+const GameBoard = ({
+  width,
+  height,
+  path,
+  towers,
+  enemies,
+  projectiles,
+  onPlaceTower,
+  selectedTowerType,
+  pathRef,
+  onTowerClick,
+  onTowerSell,
+  clickedTowerId,
+  isPaused,
+}) => {
+  const [mousePos, setMousePos] = useState(null);
+  const boardRef = useRef(null);
+
+  useEffect(() => {
+    const handleMouseMove = (e) => {
+      if (boardRef.current) {
+        const svgPoint = boardRef.current.createSVGPoint();
+        svgPoint.x = e.clientX;
+        svgPoint.y = e.clientY;
+        const transformedPoint = svgPoint.matrixTransform(boardRef.current.getScreenCTM()?.inverse());
+        setMousePos({ x: transformedPoint.x, y: transformedPoint.y });
+      }
+    };
+    
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, []);
+
+  const handleClick = (e) => {
+    if ((e.target).closest('.tower-group')) return;
+    if (selectedTowerType && mousePos) {
+      const snappedX = Math.floor(mousePos.x / GRID_SIZE) * GRID_SIZE + GRID_SIZE / 2;
+      const snappedY = Math.floor(mousePos.y / GRID_SIZE) * GRID_SIZE + GRID_SIZE / 2;
+      onPlaceTower(snappedX, snappedY);
+    }
+  };
+  
+  const renderGrid = () => {
+    const lines = [];
+    for (let i = 1; i < width / GRID_SIZE; i++) {
+      lines.push(<line key={`v-${i}`} x1={i * GRID_SIZE} y1="0" x2={i * GRID_SIZE} y2={height} stroke="rgba(107, 114, 128, 0.2)" />);
+    }
+    for (let i = 1; i < height / GRID_SIZE; i++) {
+      lines.push(<line key={`h-${i}`} x1="0" y1={i * GRID_SIZE} x2={width} y2={i * GRID_SIZE} stroke="rgba(107, 114, 128, 0.2)" />);
+    }
+    return lines;
+  };
+
+  const renderGhostTower = () => {
+    const existingTower = towers.find(t => t.type === selectedTowerType);
+    if (!selectedTowerType || !mousePos || existingTower) return null;
+    const towerStats = TOWER_DEFINITIONS[selectedTowerType].levels[0];
+    const snappedX = Math.floor(mousePos.x / GRID_SIZE) * GRID_SIZE + GRID_SIZE / 2;
+    const snappedY = Math.floor(mousePos.y / GRID_SIZE) * GRID_SIZE + GRID_SIZE / 2;
+    return (
+      <g opacity="0.5" style={{ pointerEvents: 'none' }}>
+        <TowerComponent tower={{ type: selectedTowerType, x: snappedX, y: snappedY, id: 'ghost', lastShotTime: 0, level: 1, totalInvested: 0 }} onClick={() => {}} onContextMenu={() => {}} isSelected={false}/>
+        <circle cx={snappedX} cy={snappedY} r={towerStats.range} fill="rgba(255,255,255,0.1)" stroke="white" strokeDasharray="4" />
+      </g>
+    );
+  };
+  
+  const renderLaserBeams = () => {
+    if (!pathRef.current) return null;
+    return towers.map(tower => {
+      if (tower.type === 'laser' && tower.laserTargetId) {
+        const target = enemies.find(e => e.id === tower.laserTargetId);
+        if (target) {
+          const targetPos = pathRef.current.getPointAtLength(target.pathProgress);
+          return <line key={`laser-${tower.id}`} x1={tower.x} y1={tower.y} x2={targetPos.x} y2={targetPos.y} stroke="#ef4444" strokeWidth="3" opacity="0.8" filter="url(#glow)" />;
+        }
+      }
+      return null;
+    });
+  };
+
+  const clickedTower = clickedTowerId ? towers.find(t => t.id === clickedTowerId) : null;
+
+  return (
+    <div className="relative bg-gray-700 shadow-2xl rounded-lg overflow-hidden border-4 border-gray-600">
+      <svg ref={boardRef} width={width} height={height} onClick={handleClick} className="cursor-crosshair bg-gray-600/20">
+        <defs>
+          <filter id="glow">
+            <feGaussianBlur stdDeviation="3.5" result="coloredBlur" />
+            <feMerge>
+              <feMergeNode in="coloredBlur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        </defs>
+        <g opacity="0.5">
+          <rect x="40" y="120" width="280" height="200" fill="#44403c" rx="15" />
+          <rect x="440" y="280" width="120" height="200" fill="#44403c" rx="15" />
+          <rect x="0" y="520" width="320" height="80" fill="#44403c" rx="15" />
+          <circle cx="500" cy="150" r="60" fill="#44403c" />
+        </g>
+        {renderGrid()}
+        <path d={path} ref={pathRef} stroke="#4f46e5" strokeWidth="20" fill="none" strokeLinecap="round" />
+        <path d={path} stroke="#c7d2fe" strokeWidth="2" fill="none" strokeLinecap="round" />
+        {towers.map(tower => (
+          <TowerComponent key={tower.id} tower={tower} onClick={onTowerClick} onContextMenu={onTowerSell} isSelected={tower.id === clickedTowerId} />
+        ))}
+        {renderLaserBeams()}
+        {clickedTower && (
+          <circle cx={clickedTower.x} cy={clickedTower.y} r={TOWER_DEFINITIONS[clickedTower.type].levels[clickedTower.level - 1].range} fill="rgba(255,255,255,0.1)" stroke="white" strokeWidth="1" style={{ pointerEvents: 'none' }} />
+        )}
+        {enemies.map(enemy => (
+          <EnemyComponent key={enemy.id} enemy={enemy} pathElement={pathRef.current} />
+        ))}
+        {projectiles.map(projectile => (
+          <ProjectileComponent key={projectile.id} projectile={projectile} />
+        ))}
+        {renderGhostTower()}
+      </svg>
+      {isPaused && (
+          <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+              <h2 className="text-5xl font-bold text-white/80 tracking-widest">PAUSED</h2>
+          </div>
+      )}
+    </div>
+  );
+};
+
+const TowerCard = ({ type, selected, onSelect, money, buff, towers }) => {
+  const towerDef = TOWER_DEFINITIONS[type];
+  const existingTower = towers.find(t => t.type === type);
+  const isMaxLevel = existingTower && existingTower.level >= towerDef.levels.length;
+
+  let cost, buttonText;
+  if (existingTower) {
+    if (isMaxLevel) {
+      cost = 0;
+      buttonText = "최대 레벨";
+    } else {
+      cost = towerDef.levels[existingTower.level].cost;
+      buttonText = "업그레이드";
+    }
+  } else {
+    cost = towerDef.levels[0].cost;
+    buttonText = towerDef.name;
+  }
+  
+  const canAfford = money >= cost;
+
+  const renderStats = () => {
+    const stats = towerDef.levels[0];
+    switch(type) {
+      case 'bank': return `이율: ${(stats.interestRate * 100).toFixed(0)}%`;
+      case 'laser': return `초당피해: ${(stats.baseDamage * (1 + buff.damage)).toFixed(1)} / 범위: ${(stats.range + buff.range).toFixed(0)}`;
+      case 'teleport': return `확률: ${(stats.teleportChance * 100).toFixed(0)}% / 범위: ${(stats.range + buff.range).toFixed(0)}`;
+      case 'buff': return `공격력 버프: ${(stats.damageBuff * 100).toFixed(0)}% / 범위: ${stats.range}`;
+      default: return `데미지: ${(stats.damage * (1 + buff.damage)).toFixed(1)} / 범위: ${(stats.range + buff.range).toFixed(0)}`;
+    }
+  }
+
+  return (
+    <button onClick={onSelect} disabled={!canAfford || isMaxLevel} className={`p-2 border-2 rounded-lg transition-all text-left w-full ${selected ? 'border-yellow-400 bg-yellow-900/50' : 'border-gray-600 hover:bg-gray-700'} ${(!canAfford || isMaxLevel) ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
+      <div className="flex justify-between items-center">
+        <h3 className="font-bold text-md">{buttonText}</h3>
+        {cost > 0 && <p className="font-bold text-yellow-400">${cost}</p>}
+      </div>
+      <p className="text-xs text-gray-400">{renderStats()}</p>
+    </button>
+  );
+};
+
+const GameUI = ({
+  health, money, wave, nextWaveCountdown, gameState, selectedTowerType, onSelectTowerType, onStartWave,
+  onStartGame, clickedTower, onUpgradeTower, onSellTower, onGachaDraw, gachaBuffs, towers, hasSave, onLoadGame,
+  onGoToStartScreen, isPaused, onTogglePause
+}) => {
+  const renderGameStateMessage = () => {
+    switch(gameState) {
+      case 'start':
+        return (
+          <div className="text-center p-4 bg-gray-900/50 border-2 border-gray-600 rounded-lg space-y-3">
+             <h2 className="text-xl font-bold text-indigo-300 mb-3">난이도 선택</h2>
+             {hasSave && <button onClick={onLoadGame} className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-lg transition-transform transform hover:scale-105 mb-2">게임 이어하기</button>}
+             <button onClick={() => onStartGame('easy')} className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg transition-transform transform hover:scale-105">쉬움</button>
+             <button onClick={() => onStartGame('normal')} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition-transform transform hover:scale-105">보통</button>
+             <button onClick={() => onStartGame('hard')} className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition-transform transform hover:scale-105">어려움</button>
+          </div>
+        );
+      case 'gameOver':
+        return (
+          <div className="text-center p-4 bg-red-900/50 border-2 border-red-500 rounded-lg">
+            <h2 className="text-2xl font-bold text-red-400 mb-4">게임 오버</h2>
+            <button onClick={onGoToStartScreen} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg">시작 화면으로</button>
+          </div>
+        );
+      case 'win':
+        return (
+          <div className="text-center p-4 bg-green-900/50 border-2 border-green-500 rounded-lg">
+            <h2 className="text-2xl font-bold text-green-400 mb-4">승리!</h2>
+            <button onClick={onGoToStartScreen} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg">시작 화면으로</button>
+          </div>
+        );
+      case 'playing':
+        return <div className="text-center p-3 bg-gray-700 rounded-lg text-gray-400">웨이브 진행 중...</div>;
+      case 'wave-cleared':
+        return <button onClick={onStartWave} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg text-xl transition-transform transform hover:scale-105">지금 웨이브 시작</button>;
+      default:
+        return null;
+    }
+  };
+
+  const renderTowerSelection = () => (
+    <div className="space-y-3">
+      <div>
+        <h2 className="text-lg font-semibold mb-2 text-center">타워 건설/업그레이드</h2>
+        <div className="grid grid-cols-2 gap-2">
+          {(Object.keys(TOWER_DEFINITIONS)).map(type => (
+            <TowerCard key={type} type={type} selected={selectedTowerType === type} onSelect={() => onSelectTowerType(type)} money={money} buff={gachaBuffs[type]} towers={towers}/>
+          ))}
+        </div>
+      </div>
+      <div>
+        <h2 className="text-lg font-semibold my-2 text-center">타워 강화</h2>
+        <button onClick={onGachaDraw} disabled={money < GACHA_COST} className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-lg disabled:bg-gray-500 disabled:cursor-not-allowed">
+            타워 뽑기 (${GACHA_COST})
+        </button>
+      </div>
+    </div>
+  );
+
+  const renderUpgradePanel = () => {
+    if (!clickedTower) return null;
+    const towerDef = TOWER_DEFINITIONS[clickedTower.type];
+    const currentStats = towerDef.levels[clickedTower.level - 1];
+    const nextLevel = clickedTower.level;
+    const isMaxLevel = nextLevel >= towerDef.levels.length;
+    const sellPrice = Math.floor(clickedTower.totalInvested * TOWER_SELL_RATIO);
+    
+    return (
+        <div className="p-3 border-2 rounded-lg border-yellow-400 bg-yellow-900/30">
+            <h2 className="text-xl font-bold mb-2 text-yellow-300">{towerDef.name} 타워 (레벨 {clickedTower.level})</h2>
+            <div className="text-sm space-y-1 text-gray-200">
+                { currentStats.damage > 0 && <p>데미지: {currentStats.damage.toFixed(1)}</p> }
+                { currentStats.baseDamage !== undefined && <p>기본 초당피해: {currentStats.baseDamage.toFixed(1)}</p> }
+                { currentStats.range > 0 && <p>범위: {currentStats.range}</p> }
+                { currentStats.fireRate > 0 && clickedTower.type !== 'laser' && <p>공격 속도: {(1000 / currentStats.fireRate).toFixed(2)}/s</p> }
+                { currentStats.interestRate !== undefined && <p>이율: {(currentStats.interestRate * 100).toFixed(0)}%</p>}
+                { currentStats.teleportChance !== undefined && <p>순간이동 확률: {(currentStats.teleportChance * 100).toFixed(0)}%</p>}
+            </div>
+            {!isMaxLevel && (
+              <div className="mt-4">
+                  <button onClick={onUpgradeTower} disabled={money < towerDef.levels[nextLevel].cost} className="w-full bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-2 px-4 rounded-lg disabled:bg-gray-500 disabled:cursor-not-allowed">
+                      업그레이드 (${towerDef.levels[nextLevel].cost})
+                  </button>
+                   { towerDef.levels[nextLevel].damage > 0 && <p className="text-xs text-center mt-1 text-gray-400">다음 레벨 데미지: {towerDef.levels[nextLevel].damage.toFixed(1)}</p> }
+                   { towerDef.levels[nextLevel].interestRate !== undefined && <p className="text-xs text-center mt-1 text-gray-400">다음 레벨 이율: {(towerDef.levels[nextLevel].interestRate * 100).toFixed(0)}%</p> }
+                   { towerDef.levels[nextLevel].teleportChance !== undefined && <p className="text-xs text-center mt-1 text-gray-400">다음 레벨 확률: {(towerDef.levels[nextLevel].teleportChance * 100).toFixed(0)}%</p> }
+              </div>
+            )}
+            {isMaxLevel && <p className="mt-4 text-center font-bold text-green-400">최대 레벨</p>}
+            <button onClick={() => onSellTower(clickedTower.id)} className="w-full mt-2 bg-red-700 hover:bg-red-800 text-white font-bold py-1 px-4 rounded-lg">판매 (${sellPrice})</button>
+        </div>
+    );
+  };
+  
+  const hasAnyBuffs = Object.values(gachaBuffs).some((b) => b.damage > 0 || b.range > 0 || b.fireRate > 0);
+
+  return (
+    <div className="w-full md:w-96 bg-gray-800 p-4 rounded-lg shadow-2xl border-4 border-gray-700/50 md:ml-4 mt-4 md:mt-0 flex flex-col space-y-4">
+      <h1 className="text-3xl font-bold text-center text-indigo-400 pb-2 border-b-2 border-gray-700">타워 디펜스</h1>
+      
+      <div className="grid grid-cols-3 gap-2 text-center">
+        <div className="bg-gray-900 p-2 rounded-lg"> <p className="text-sm text-red-400">체력</p> <p className="text-xl font-bold">{health}</p> </div>
+        <div className="bg-gray-900 p-2 rounded-lg"> <p className="text-sm text-yellow-400">자금</p> <p className="text-xl font-bold">${money}</p> </div>
+        <div className="bg-gray-900 p-2 rounded-lg"> <p className="text-sm text-blue-400">웨이브</p> <p className="text-xl font-bold">{wave}</p> </div>
+        <div className="col-span-2 bg-gray-900 p-2 rounded-lg"> <p className="text-sm text-gray-400">다음 웨이브</p> <p className="text-xl font-bold">{nextWaveCountdown !== null ? `${nextWaveCountdown}초` : '--'}</p> </div>
+        <button onClick={onTogglePause} disabled={gameState === 'start'} className="bg-gray-600 hover:bg-gray-700 p-2 rounded-lg disabled:opacity-50 flex items-center justify-center">
+           {isPaused ? '▶️' : '⏸️'}
+        </button>
+      </div>
+
+      <div className="flex-grow overflow-y-auto pr-2">
+        {gameState !== 'start' && (clickedTower ? renderUpgradePanel() : renderTowerSelection())}
+        {hasAnyBuffs && gameState !== 'start' && <div className="mt-3">
+             <h3 className="text-md font-semibold text-center text-purple-300">강화 효과</h3>
+             <div className="text-xs text-gray-400 grid grid-cols-2 gap-x-2">
+                { (Object.entries(gachaBuffs)).map(([type, buff]) => {
+                    if (buff.damage === 0 && buff.range === 0 && buff.fireRate === 0) return null;
+                    return <div key={type} className="truncate">
+                        <span className="font-bold text-gray-200">{TOWER_DEFINITIONS[type].name}:</span>
+                        {buff.damage > 0 && ` D+${(buff.damage*100).toFixed(0)}%`}
+                        {buff.range > 0 && ` R+${buff.range}`}
+                        {buff.fireRate > 0 && ` S+${(buff.fireRate*100).toFixed(0)}%`}
+                    </div>
+                })}
+             </div>
+        </div>}
+      </div>
+      
+      <div className="mt-auto pt-2 border-t-2 border-gray-700/50">
+        {renderGameStateMessage()}
+      </div>
+    </div>
+  );
+};
+
+
+// --- START OF APP ---
+const App = () => {
+  const [gameState, setGameState] = useState('start');
+  const [difficulty, setDifficulty] = useState('normal');
+  const [playerHealth, setPlayerHealth] = useState(DIFFICULTY_MODIFIERS.normal.startingHealth);
+  const [playerMoney, setPlayerMoney] = useState(DIFFICULTY_MODIFIERS.normal.startingMoney);
+  const [currentWave, setCurrentWave] = useState(0);
+  const [nextWaveCountdown, setNextWaveCountdown] = useState(null);
+  const [isPaused, setIsPaused] = useState(false);
+  const [hasSave, setHasSave] = useState(false);
+
+  const [towers, setTowers] = useState([]);
+  const [enemies, setEnemies] = useState([]);
+  const [projectiles, setProjectiles] = useState([]);
+  const initialBuffs = (Object.keys(TOWER_DEFINITIONS)).reduce((acc, type) => {
+    acc[type] = { damage: 0, range: 0, fireRate: 0 };
+    return acc;
+  }, {});
+  const [gachaBuffs, setGachaBuffs] = useState(initialBuffs);
+
+  const [selectedTowerType, setSelectedTowerType] = useState(null);
+  const [clickedTowerId, setClickedTowerId] = useState(null);
+  
+  const gameLoopRef = useRef();
+  const lastTickTimeRef = useRef(Date.now());
+  const pathRef = useRef(null);
+
+  useEffect(() => {
+      setHasSave(localStorage.getItem(SAVE_GAME_KEY) !== null);
+  }, [gameState]);
+
+  const handleGoToStartScreen = () => {
+    setGameState('start');
+  }
+
+  const handleTogglePause = () => {
+    if (gameState !== 'playing' && gameState !== 'wave-cleared') return;
+    setIsPaused(prev => !prev);
+  }
+
+  const handleSaveGame = useCallback(() => {
+      if(gameState === 'gameOver' || gameState === 'start') return;
+      const dataToSave = { playerHealth, playerMoney, currentWave, towers, gachaBuffs, difficulty };
+      localStorage.setItem(SAVE_GAME_KEY, JSON.stringify(dataToSave));
+  }, [playerHealth, playerMoney, currentWave, towers, gachaBuffs, difficulty, gameState]);
+  
+  const handleLoadGame = () => {
+      const savedDataRaw = localStorage.getItem(SAVE_GAME_KEY);
+      if (savedDataRaw) {
+          const savedData = JSON.parse(savedDataRaw);
+          setPlayerHealth(savedData.playerHealth);
+          setPlayerMoney(savedData.playerMoney);
+          setCurrentWave(savedData.currentWave);
+          setTowers(savedData.towers);
+          setGachaBuffs(savedData.gachaBuffs);
+          setDifficulty(savedData.difficulty);
+          setGameState('wave-cleared');
+          setNextWaveCountdown(WAVE_COOLDOWN_SECONDS);
+          setEnemies([]);
+          setProjectiles([]);
+          setSelectedTowerType(null);
+          setClickedTowerId(null);
+          lastTickTimeRef.current = Date.now();
+      }
+  };
+
+  const resetGame = useCallback((diff) => {
+    const modifiers = DIFFICULTY_MODIFIERS[diff];
+    setGameState('playing');
+    setDifficulty(diff);
+    setPlayerHealth(modifiers.startingHealth);
+    setPlayerMoney(modifiers.startingMoney);
+    setCurrentWave(0);
+    setTowers([]);
+    setEnemies([]);
+    setProjectiles([]);
+    setGachaBuffs(JSON.parse(JSON.stringify(initialBuffs)));
+    setSelectedTowerType(null);
+    setClickedTowerId(null);
+    setNextWaveCountdown(null);
+    lastTickTimeRef.current = Date.now();
+  }, []);
+  
+  const startGame = useCallback((diff) => {
+    localStorage.removeItem(SAVE_GAME_KEY);
+    resetGame(diff);
+    setTimeout(() => handleStartWave(0, diff), 100);
+  }, [resetGame]);
+
+  const handleStartWave = useCallback((waveOverride, diffOverride) => {
+    const effectiveDifficulty = diffOverride || difficulty;
+    if (gameState === 'playing' && waveOverride === undefined) return;
+    setIsPaused(false);
+    setNextWaveCountdown(null);
+    
+    const waveNumber = waveOverride !== undefined ? waveOverride + 1 : currentWave + 1;
+    let waveData;
+    if (waveNumber <= ENEMY_WAVES.length) {
+        waveData = ENEMY_WAVES[waveNumber - 1];
+    } else {
+        const waveIndex = waveNumber - ENEMY_WAVES.length;
+        const health = 50 * Math.pow(1.2, waveIndex);
+        const speed = 1 + waveIndex * 0.04;
+        const bounty = 5 + waveIndex;
+        const count = 10 + waveIndex * 1.5;
+        const enemyTypes = ['normal', 'fast', 'heavy'];
+        const type = enemyTypes[waveNumber % 3];
+        waveData = { count: Math.floor(count), type, stats: { health, speed, bounty: Math.floor(bounty) } };
+    }
+    
+    if (!waveData) { setGameState('win'); return; }
+
+    setClickedTowerId(null);
+    setSelectedTowerType(null);
+    setCurrentWave(waveNumber);
+    setGameState('playing');
+    
+    let enemiesToSpawn = waveData.count;
+    const diffModifier = DIFFICULTY_MODIFIERS[effectiveDifficulty];
+    const spawnInterval = setInterval(() => {
+      if (enemiesToSpawn > 0) {
+        setEnemies(prev => [ ...prev, { id: uuidv4(), type: waveData.type, ...waveData.stats, health: waveData.stats.health * diffModifier.healthMultiplier, bounty: Math.round(waveData.stats.bounty * diffModifier.bountyMultiplier), pathProgress: 0, maxHealth: waveData.stats.health * diffModifier.healthMultiplier, effects: [] }, ]);
+        enemiesToSpawn--;
+      } else {
+        clearInterval(spawnInterval);
+      }
+    }, 500);
+  }, [currentWave, gameState, difficulty]);
+
+  const getEffectiveTowerStats = useCallback((tower, allTowers, currentGachaBuffs) => {
+    const baseStats = TOWER_DEFINITIONS[tower.type].levels[tower.level - 1];
+    const gacha = currentGachaBuffs[tower.type];
+    let damageMultiplier = 1 + gacha.damage;
+    let fireRateMultiplier = 1 - gacha.fireRate;
+    let finalRange = baseStats.range + gacha.range;
+    const buffTowers = allTowers.filter(t => t.type === 'buff');
+    for (const buffTower of buffTowers) {
+      const dist = Math.hypot(tower.x - buffTower.x, tower.y - buffTower.y);
+      const buffStats = TOWER_DEFINITIONS.buff.levels[buffTower.level - 1];
+      if (dist <= buffStats.range) {
+        damageMultiplier += buffStats.damageBuff || 0;
+        fireRateMultiplier -= buffStats.fireRateBuff || 0;
+      }
+    }
+    const damage = (baseStats.damage || baseStats.baseDamage || 0);
+    return { ...baseStats, damage: damage * damageMultiplier, fireRate: baseStats.fireRate * fireRateMultiplier, range: finalRange };
+  }, []);
+
+  const gameLoop = useCallback(() => {
+    if (isPaused || gameState !== 'playing' || !pathRef.current) return;
+    const path = pathRef.current;
+    const pathLength = path.getTotalLength();
+    const now = Date.now();
+    const deltaTime = (now - lastTickTimeRef.current) / 1000;
+    lastTickTimeRef.current = now;
+    
+    const damageMap = {};
+    const effectsMap = {};
+    const teleportSet = new Set();
+
+    setEnemies(prevEnemies => {
+        const remainingEnemies = [];
+        for (const enemy of prevEnemies) {
+            let currentEnemy = { ...enemy, effects: enemy.effects.filter(e => e.expires > now) };
+            const poisonDamage = currentEnemy.effects.reduce((acc, e) => e.type === 'poison' ? acc + e.amount * deltaTime : acc, 0);
+            currentEnemy.health -= poisonDamage;
+            if (currentEnemy.health <= 0) { setPlayerMoney(p => p + currentEnemy.bounty); continue; }
+            const slowFactor = currentEnemy.effects.reduce((acc, e) => e.type === 'slow' ? acc * (1 - e.amount) : acc, 1);
+            currentEnemy.pathProgress += currentEnemy.speed * slowFactor * deltaTime * 50;
+            if (currentEnemy.pathProgress >= pathLength) { setPlayerHealth(prev => Math.max(0, prev - 1)); continue; }
+            remainingEnemies.push(currentEnemy);
+        }
+        return remainingEnemies;
+    });
+
+    setTowers(prevTowers => {
+        const allTowers = [...prevTowers];
+        return allTowers.map(tower => {
+            const stats = getEffectiveTowerStats(tower, allTowers, gachaBuffs);
+            const findTarget = () => enemies.reduce((acc, enemy) => {
+                const enemyPos = path.getPointAtLength(enemy.pathProgress);
+                const distance = Math.hypot(enemyPos.x - tower.x, enemyPos.y - tower.y);
+                if (distance <= stats.range && (!acc || enemy.pathProgress > acc.pathProgress)) return enemy;
+                return acc;
+            }, null);
+
+            if (tower.type === 'laser') {
+                let currentTarget = enemies.find(e => e.id === tower.laserTargetId);
+                if (currentTarget) {
+                    const targetPos = path.getPointAtLength(currentTarget.pathProgress);
+                    if (Math.hypot(targetPos.x - tower.x, targetPos.y - tower.y) > stats.range) currentTarget = undefined;
+                }
+                if (!currentTarget) {
+                    const newTarget = findTarget();
+                    if (newTarget) return { ...tower, laserTargetId: newTarget.id, laserFocusStartTime: now };
+                    return { ...tower, laserTargetId: undefined };
+                }
+                const focusDuration = (now - (tower.laserFocusStartTime || now)) / 1000;
+                const damage = (stats.baseDamage + focusDuration * stats.damageRampUp) * deltaTime;
+                damageMap[currentTarget.id] = (damageMap[currentTarget.id] || 0) + damage;
+                return tower;
+            }
+            if (tower.type === 'bank' || tower.type === 'buff' || now - tower.lastShotTime < stats.fireRate) return tower;
+            
+            const target = findTarget();
+            if (target) {
+                if(tower.type === 'teleport') { if (Math.random() < stats.teleportChance) teleportSet.add(target.id); } 
+                else {
+                    let effect;
+                    if (tower.type === 'slow') effect = { type: 'slow', amount: stats.slowAmount, expires: now + stats.slowDuration };
+                    if (tower.type === 'poison') effect = { type: 'poison', amount: stats.dotAmount, expires: now + stats.dotDuration };
+                    setProjectiles(prev => [...prev, { id: uuidv4(), x: tower.x, y: tower.y, targetId: target.id, damage: stats.damage, speed: stats.projectileSpeed || 10, type: tower.type, effect: effect ? { type: effect.type, amount: effect.amount, duration: stats.slowDuration || stats.dotDuration } : undefined, splashRadius: tower.type === 'splash' ? stats.splashRadius : undefined, }]);
+                }
+                return { ...tower, lastShotTime: now };
+            }
+            return tower;
+        });
+    });
+
+    setProjectiles(prevProjectiles => {
+      const updatedProjectiles = [];
+      for (const p of prevProjectiles) {
+        const target = enemies.find(e => e.id === p.targetId);
+        if (!target) continue;
+        const targetPos = path.getPointAtLength(target.pathProgress);
+        const dx = targetPos.x - p.x, dy = targetPos.y - p.y;
+        const distance = Math.hypot(dx, dy);
+        const travelDistance = p.speed * deltaTime * 20;
+        if (distance < travelDistance) {
+          damageMap[target.id] = (damageMap[target.id] || 0) + p.damage;
+          if (p.effect) {
+              if (!effectsMap[target.id]) effectsMap[target.id] = [];
+              effectsMap[target.id].push({ type: p.effect.type, amount: p.effect.amount, expires: now + p.effect.duration });
+          }
+          const towerDef = TOWER_DEFINITIONS[p.type].levels[towers.find(t=>t.type === p.type)?.level - 1];
+          if (p.splashRadius) { enemies.forEach(e => { if (e.id === target.id) return; const ePos = path.getPointAtLength(e.pathProgress); if (Math.hypot(ePos.x - targetPos.x, ePos.y - targetPos.y) <= p.splashRadius) damageMap[e.id] = (damageMap[e.id] || 0) + p.damage; }); }
+          if (p.type === 'chain' && towerDef) {
+            let currentTarget = target, remainingJumps = towerDef.chainJumps, currentDamage = p.damage;
+            const hitEnemies = new Set([target.id]);
+            while(remainingJumps > 0) {
+              const nextTarget = enemies.find(e => !hitEnemies.has(e.id) && Math.hypot(path.getPointAtLength(e.pathProgress).x - path.getPointAtLength(currentTarget.pathProgress).x, path.getPointAtLength(e.pathProgress).y - path.getPointAtLength(currentTarget.pathProgress).y) <= towerDef.chainJumpRange);
+              if (!nextTarget) break;
+              currentDamage *= towerDef.damageFalloff;
+              damageMap[nextTarget.id] = (damageMap[nextTarget.id] || 0) + currentDamage;
+              hitEnemies.add(nextTarget.id);
+              currentTarget = nextTarget;
+              remainingJumps--;
+            }
+          }
+        } else {
+          updatedProjectiles.push({ ...p, x: p.x + (dx / distance) * travelDistance, y: p.y + (dy / distance) * travelDistance });
+        }
+      }
+      return updatedProjectiles;
+    });
+    
+    if (Object.keys(damageMap).length > 0 || Object.keys(effectsMap).length > 0 || teleportSet.size > 0) {
+      setEnemies(prevEnemies => prevEnemies.map(e => {
+          if (!damageMap[e.id] && !effectsMap[e.id] && !teleportSet.has(e.id)) return e;
+          return { ...e, health: e.health - (damageMap[e.id] || 0), effects: [...e.effects, ...(effectsMap[e.id] || [])], pathProgress: teleportSet.has(e.id) ? 0 : e.pathProgress };
+      }));
+    }
+
+    gameLoopRef.current = requestAnimationFrame(gameLoop);
+  }, [gameState, enemies, gachaBuffs, getEffectiveTowerStats, isPaused]);
+
+  useEffect(() => {
+    if (gameState === 'playing' && !isPaused) {
+      lastTickTimeRef.current = Date.now();
+      gameLoopRef.current = requestAnimationFrame(gameLoop);
+    }
+    return () => {
+      if (gameLoopRef.current) cancelAnimationFrame(gameLoopRef.current);
+    };
+  }, [gameState, gameLoop, isPaused]);
+  
+  useEffect(() => { if (playerHealth <= 0 && gameState === 'playing') { setGameState('gameOver'); localStorage.removeItem(SAVE_GAME_KEY); } }, [playerHealth, gameState]);
+
+  useEffect(() => { if (gameState === 'playing' && enemies.length === 0 && currentWave > 0) { if(currentWave >= 50){ setGameState('win'); localStorage.removeItem(SAVE_GAME_KEY); } else { setGameState('wave-cleared'); setNextWaveCountdown(WAVE_COOLDOWN_SECONDS); } } }, [enemies, currentWave, gameState]);
+  
+  useEffect(() => {
+    if (gameState === 'wave-cleared') {
+        const totalInterestRate = towers.reduce((acc, tower) => { if (tower.type === 'bank') return acc + TOWER_DEFINITIONS.bank.levels[tower.level - 1].interestRate; return acc; }, 0);
+        if (totalInterestRate > 0) setPlayerMoney(p => p + Math.floor(p * totalInterestRate));
+        handleSaveGame();
+    }
+  }, [gameState, towers, handleSaveGame]);
+
+  useEffect(() => {
+    if (gameState === 'wave-cleared' && nextWaveCountdown !== null && !isPaused) {
+      if (nextWaveCountdown > 0) {
+        const timerId = setTimeout(() => setNextWaveCountdown(c => (c !== null ? c - 1 : null)), 1000);
+        return () => clearTimeout(timerId);
+      } else {
+        handleStartWave();
+      }
+    }
+  }, [gameState, nextWaveCountdown, handleStartWave, isPaused]);
+
+  const handleSelectTowerType = (type) => { setSelectedTowerType(type); setClickedTowerId(null); };
+  const handleTowerClick = (id) => { setClickedTowerId(id); setSelectedTowerType(null); };
+
+  const handleUpgradeTower = (towerId) => {
+    const towerToUpgrade = towers.find(t => t.id === towerId);
+    if (!towerToUpgrade) return;
+    
+    const def = TOWER_DEFINITIONS[towerToUpgrade.type];
+    if (towerToUpgrade.level >= def.levels.length) return;
+
+    const upgradeCost = def.levels[towerToUpgrade.level].cost;
+    if (playerMoney >= upgradeCost) {
+      setPlayerMoney(p => p - upgradeCost);
+      setTowers(ts => ts.map(t => t.id === towerId ? { ...t, level: t.level + 1, totalInvested: t.totalInvested + upgradeCost, laserTargetId: undefined } : t));
+    }
+  };
+
+  const handlePlaceTower = (x, y) => {
+    if (!selectedTowerType || (gameState !== 'playing' && gameState !== 'wave-cleared')) return;
+    const existingTower = towers.find(t => t.type === selectedTowerType);
+    if (existingTower) {
+        handleUpgradeTower(existingTower.id);
+    } else {
+        const towerCost = TOWER_DEFINITIONS[selectedTowerType].levels[0].cost;
+        if (playerMoney >= towerCost) {
+            setPlayerMoney(prev => prev - towerCost);
+            setTowers(prev => [...prev, { id: uuidv4(), type: selectedTowerType, x, y, level: 1, lastShotTime: 0, totalInvested: towerCost }]);
+            setSelectedTowerType(null);
+        }
+    }
+  };
+  
+  const handleSellTower = (towerId) => {
+    const towerToSell = towers.find(t => t.id === towerId);
+    if (!towerToSell) return;
+    const sellPrice = Math.floor(towerToSell.totalInvested * TOWER_SELL_RATIO);
+    setPlayerMoney(p => p + sellPrice);
+    setTowers(t => t.filter(tower => tower.id !== towerId));
+    if (clickedTowerId === towerId) setClickedTowerId(null);
+  };
+
+  const handleGachaDraw = () => {
+    if (playerMoney < GACHA_COST) return;
+    setPlayerMoney(p => p - GACHA_COST);
+    const towerTypes = Object.keys(TOWER_DEFINITIONS);
+    const drawnTower = towerTypes[Math.floor(Math.random() * towerTypes.length)];
+    setGachaBuffs(prev => {
+        const newBuffs = { ...prev };
+        const buffType = Math.random();
+        if(buffType < 0.5) newBuffs[drawnTower] = { ...newBuffs[drawnTower], damage: newBuffs[drawnTower].damage + GACHA_BUFFS.damage };
+        else if (buffType < 0.85) newBuffs[drawnTower] = { ...newBuffs[drawnTower], fireRate: newBuffs[drawnTower].fireRate + GACHA_BUFFS.fireRate };
+        else newBuffs[drawnTower] = { ...newBuffs[drawnTower], range: newBuffs[drawnTower].range + GACHA_BUFFS.range };
+        return newBuffs;
+    });
+  };
+
+  return (
+    <div className="flex flex-col md:flex-row items-center justify-center min-h-screen bg-gray-800 p-4 font-sans">
+      <GameBoard width={GAME_BOARD_WIDTH} height={GAME_BOARD_HEIGHT} path={PATH_SVG_D} towers={towers} enemies={enemies} projectiles={projectiles} onPlaceTower={handlePlaceTower} selectedTowerType={selectedTowerType} pathRef={pathRef} onTowerClick={handleTowerClick} onTowerSell={handleSellTower} clickedTowerId={clickedTowerId} isPaused={isPaused} />
+      <GameUI health={playerHealth} money={playerMoney} wave={currentWave} nextWaveCountdown={nextWaveCountdown} gameState={gameState} selectedTowerType={selectedTowerType} onSelectTowerType={handleSelectTowerType} onStartWave={handleStartWave} onStartGame={startGame} clickedTower={towers.find(t => t.id === clickedTowerId) || null} onUpgradeTower={() => handleUpgradeTower(clickedTowerId)} onSellTower={handleSellTower} onGachaDraw={handleGachaDraw} gachaBuffs={gachaBuffs} towers={towers} hasSave={hasSave} onLoadGame={handleLoadGame} onGoToStartScreen={handleGoToStartScreen} isPaused={isPaused} onTogglePause={handleTogglePause} />
+    </div>
+  );
+};
+
+// --- START OF RENDER ---
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error("루트 요소를 찾을 수 없습니다.");
+}
+
+const root = ReactDOM.createRoot(rootElement);
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+    </script>
+  </body>
+</html>
